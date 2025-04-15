@@ -1,5 +1,6 @@
 #include "llama-adapter.h"
 
+#include "ggml-backend.h"
 #include "llama-impl.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
@@ -264,7 +265,9 @@ static void llama_adapter_lora_init_impl(struct llama_model & model, const char 
             throw std::runtime_error("LoRA tensor '" + name + "' does not exist in base model (hint: maybe wrong base model?)");
         }
 
-        struct ggml_context * dev_ctx = ctx_for_buft(ggml_backend_buffer_get_type(model_tensor->buffer));
+        // struct ggml_context * dev_ctx = ctx_for_buft(ggml_backend_buffer_get_type(model_tensor->buffer));
+
+        struct ggml_context *  cpu_ctx = ctx_for_buft(ggml_backend_cpu_buffer_type());
         // validate tensor shape
         if (is_token_embd) {
             // expect B to be non-transposed, A and B are flipped; see llm_build_inp_embd()
@@ -281,8 +284,10 @@ static void llama_adapter_lora_init_impl(struct llama_model & model, const char 
         }
 
         // save tensor to adapter
-        struct ggml_tensor * tensor_a = ggml_dup_tensor(dev_ctx, w.a);
-        struct ggml_tensor * tensor_b = ggml_dup_tensor(dev_ctx, w.b);
+        // struct ggml_tensor * tensor_a = ggml_dup_tensor(dev_ctx, w.a);
+        // struct ggml_tensor * tensor_b = ggml_dup_tensor(dev_ctx, w.b);
+        struct ggml_tensor * tensor_a = ggml_dup_tensor(cpu_ctx, w.a);
+        struct ggml_tensor * tensor_b = ggml_dup_tensor(cpu_ctx, w.b);
         ggml_set_name(tensor_a, w.a->name);
         ggml_set_name(tensor_b, w.b->name);
         adapter.ab_map[name] = llama_adapter_lora_weight(tensor_a, tensor_b);

@@ -5,7 +5,7 @@
 #include "ggml-cpp.h"
 
 #include <string>
-#include <unordered_map>
+#include <map>
 #include <vector>
 
 // TODO: pimpl
@@ -60,7 +60,7 @@ struct llama_adapter_lora_weight {
 
 struct llama_adapter_lora {
     // map tensor name to lora_a_b
-    std::unordered_map<std::string, struct llama_adapter_lora_weight> ab_map;
+    std::map<std::string, struct llama_adapter_lora_weight> ab_map;
 
     std::vector<ggml_context_ptr> ctxs;
     std::vector<ggml_backend_buffer_ptr> bufs;

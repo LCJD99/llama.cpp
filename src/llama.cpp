@@ -25,6 +25,7 @@
 #include <cstring>
 #include <ctime>
 #include <functional>
+#include <string>
 
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
@@ -203,7 +204,12 @@ static struct ggml_tensor * llm_build_lora_mm(
         struct llama_context & lctx,
          struct ggml_context * ctx0,
           struct ggml_tensor * w,
-          struct ggml_tensor * cur) {
+          struct ggml_tensor * cur,
+          struct ggml_tensor * cur_cpu = nullptr
+        ) {
+
+    cur_cpu = cur_cpu ? cur_cpu : cur;
+
     struct ggml_tensor * res = ggml_mul_mat(ctx0, w, cur);
     for (auto & it : lctx.lora) {
         struct llama_adapter_lora_weight * lw = it.first->get_weight(w);
@@ -212,12 +218,14 @@ static struct ggml_tensor * llm_build_lora_mm(
         }
         const float adapter_scale = it.second;
         const float scale = lw->get_scale(it.first->alpha, adapter_scale);
-        struct ggml_tensor * ab_cur = ggml_mul_mat(
-            ctx0, lw->b,
-            ggml_mul_mat(ctx0, lw->a, cur)
-        );
-        ab_cur = ggml_scale(ctx0, ab_cur, scale);
-        res = ggml_add(ctx0, res, ab_cur);
+        struct ggml_tensor * cpu_temp = ggml_mul_mat(ctx0, lw->a, cur_cpu);
+        strcpy(cpu_temp->name, (std::string(w->name) + "1.cpu").c_str());
+        cpu_temp = ggml_mul_mat(ctx0, lw->b, cpu_temp);
+        strcpy(cpu_temp->name, (std::string(w->name) + "2.cpu").c_str());
+        cpu_temp = ggml_scale(ctx0, cpu_temp, scale);
+        strcpy(cpu_temp->name, (std::string(w->name)+"3.cpu").c_str());
+
+        res = ggml_add(ctx0, res, cpu_temp);
     }
     return res;
 }
@@ -3329,6 +3337,7 @@ struct llm_build_context {
 
         struct ggml_tensor * cur;
         struct ggml_tensor * inpL;
+        struct ggml_tensor * cur_cpu;
 
         inpL = llm_build_inp_embd(ctx0, lctx, hparams, ubatch, model.tok_embd, cb);
 
@@ -3347,20 +3356,26 @@ struct llm_build_context {
                     LLM_NORM_RMS, cb, il);
             cb(cur, "attn_norm", il);
 
+            cur_cpu = llm_build_norm(ctx0, inpL, hparams,
+                    model.layers[il].attn_norm, NULL,
+                    LLM_NORM_RMS, cb, il);
+            strcpy(cur_cpu->name, cur->name);
+            strcat(cur_cpu->name, ".cpu");
+
             // self-attention
             {
                 // compute Q and K and RoPE them
-                struct ggml_tensor * Qcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wq, cur);
+                struct ggml_tensor * Qcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wq, cur, cur_cpu);
                 cb(Qcur, "Qcur", il);
                 Qcur = ggml_add(ctx0, Qcur, model.layers[il].bq);
                 cb(Qcur, "Qcur", il);
 
-                struct ggml_tensor * Kcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wk, cur);
+                struct ggml_tensor * Kcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wk, cur, cur_cpu);
                 cb(Kcur, "Kcur", il);
                 Kcur = ggml_add(ctx0, Kcur, model.layers[il].bk);
                 cb(Kcur, "Kcur", il);
 
-                struct ggml_tensor * Vcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wv, cur);
+                struct ggml_tensor * Vcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wv, cur, cur_cpu);
                 cb(Vcur, "Vcur", il);
                 Vcur = ggml_add(ctx0, Vcur, model.layers[il].bv);
                 cb(Vcur, "Vcur", il);

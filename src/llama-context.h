@@ -10,7 +10,6 @@
 #include "ggml-cpp.h"
 
 #include <map>
-#include <unordered_map>
 #include <vector>
 #include <set>
 
@@ -27,7 +26,7 @@ struct llama_context {
     struct llama_kv_cache     kv_self;
     struct llama_adapter_cvec cvec;
 
-    std::unordered_map<struct llama_adapter_lora *, float> lora;
+    std::map<struct llama_adapter_lora *, float> lora;
 
     std::vector<ggml_backend_ptr> backends;
     std::vector<std::pair<ggml_backend_t, ggml_backend_set_n_threads_t>> set_n_threads_fns;
