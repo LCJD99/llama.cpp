@@ -205,7 +205,8 @@ static struct ggml_tensor * llm_build_lora_mm(
          struct ggml_context * ctx0,
           struct ggml_tensor * w,
           struct ggml_tensor * cur,
-          struct ggml_tensor * cur_cpu = nullptr
+          struct ggml_tensor * cur_cpu = nullptr,
+         struct ggml_cgraph * graph = nullptr
         ) {
 
     cur_cpu = cur_cpu ? cur_cpu : cur;
@@ -224,6 +225,9 @@ static struct ggml_tensor * llm_build_lora_mm(
         strcpy(cpu_temp->name, (std::string(w->name) + "2.cpu").c_str());
         cpu_temp = ggml_scale(ctx0, cpu_temp, scale);
         strcpy(cpu_temp->name, (std::string(w->name)+"3.cpu").c_str());
+        if (graph != nullptr) {
+            ggml_build_forward_expand(graph, cpu_temp);
+        }
 
         res = ggml_add(ctx0, res, cpu_temp);
     }
@@ -3365,17 +3369,17 @@ struct llm_build_context {
             // self-attention
             {
                 // compute Q and K and RoPE them
-                struct ggml_tensor * Qcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wq, cur, cur_cpu);
+                struct ggml_tensor * Qcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wq, cur, cur_cpu, gf);
                 cb(Qcur, "Qcur", il);
                 Qcur = ggml_add(ctx0, Qcur, model.layers[il].bq);
                 cb(Qcur, "Qcur", il);
 
-                struct ggml_tensor * Kcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wk, cur, cur_cpu);
+                struct ggml_tensor * Kcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wk, cur, cur_cpu, gf);
                 cb(Kcur, "Kcur", il);
                 Kcur = ggml_add(ctx0, Kcur, model.layers[il].bk);
                 cb(Kcur, "Kcur", il);
 
-                struct ggml_tensor * Vcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wv, cur, cur_cpu);
+                struct ggml_tensor * Vcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wv, cur, cur_cpu, gf);
                 cb(Vcur, "Vcur", il);
                 Vcur = ggml_add(ctx0, Vcur, model.layers[il].bv);
                 cb(Vcur, "Vcur", il);
