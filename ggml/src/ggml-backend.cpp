@@ -1,5 +1,6 @@
 // Note: porting this file to C++ is a work in progress
 
+#include <cstdio>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
@@ -22,6 +23,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cstring>
 
 #ifdef __APPLE__
 #include <sys/types.h>
@@ -440,8 +442,9 @@ void ggml_backend_event_synchronize(ggml_backend_event_t event) {
 }
 
 void ggml_backend_event_wait(ggml_backend_t backend, ggml_backend_event_t event) {
-    GGML_ASSERT(backend->iface.event_wait != NULL);
-
+    if (backend->iface.event_wait == NULL) {
+        return;
+    }
     backend->iface.event_wait(backend, event);
 }
 
@@ -675,6 +678,9 @@ struct ggml_backend_sched {
     size_t context_buffer_size;
 
     int debug;
+
+    // ggml_backend_event_t hp_events[2];
+    bool hp_events[2];
 };
 
 #define hash_id(tensor) ggml_hash_find_or_insert(&sched->hash_set, tensor)
@@ -870,6 +876,8 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
     sched->n_graph_inputs = 0;
     sched->is_reset = false;
 
+    // ggml_graph_dump_dot(graph, NULL, "debug.dot");
+
     struct ggml_init_params params = {
         /* .mem_size =   */ sched->context_buffer_size,
         /* .mem_buffer = */ sched->context_buffer,
@@ -933,6 +941,7 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
         split->i_start = 0;
         split->n_inputs = 0;
         int cur_backend_id = split->backend_id;
+        bool is_xw = false;
         for (; i < graph->n_nodes; i++) {
             struct ggml_tensor * node = graph->nodes[i];
 
@@ -973,6 +982,15 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
                         }
                     }
                 }
+            }
+
+            if (strncmp(node->name, "xw.", 3) == 0) {
+                if (!is_xw) {
+                    need_new_split = true;
+                }
+                is_xw = true;
+            } else {
+                is_xw = false;
             }
 
             if (node_backend_id != cur_backend_id || need_new_split) {
@@ -1187,16 +1205,29 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
 
 static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
     struct ggml_backend_sched_split * splits = sched->splits;
+    // for (int i = 0; i < sched->n_splits; i++) {
+    //     struct ggml_backend_sched_split * split = &splits[i];
+    //     int split_backend_id = split->backend_id;
+    //     printf("split[%d]: backend(%d)\n", i, split_backend_id);
+    //     fflush(stdout);
+    // }
 
     for (int i = 0; i < sched->n_splits; i++) {
         struct ggml_backend_sched_split * split = &splits[i];
         int split_backend_id = split->backend_id;
         ggml_backend_t split_backend = sched->backends[split_backend_id];
-
+        // GGML_LOG("\nsplit %d(%d): ", i, split_backend_id);
+        if (split_backend_id == 0) {
+            if (sched->hp_events[0]) {
+                ggml_backend_event_wait(split_backend, nullptr);
+                sched->hp_events[0] = false;
+            }
+        }
         // copy the input tensors to the split backend
         for (int j = 0; j < split->n_inputs; j++) {
             ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[j]);
             struct ggml_tensor * input = split->inputs[j];
+            // GGML_LOG("%s, ", input->name);
             struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
 
             if (input->flags & GGML_TENSOR_FLAG_INPUT) {
@@ -1230,6 +1261,9 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
 
         if (!sched->callback_eval) {
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
+            if (split_backend_id == 0) {
+                sched->hp_events[0] = true;
+            }
             if (ec != GGML_STATUS_SUCCESS) {
                 return ec;
             }
@@ -1273,6 +1307,10 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 ggml_backend_event_record(sched->events[split_backend_id][sched->cur_copy], split_backend);
             }
         }
+    }
+    if (sched->hp_events[0]) {
+        ggml_backend_event_wait(sched->backends[0], nullptr);
+        sched->hp_events[0] = false;
     }
 
     sched->cur_copy = (sched->cur_copy + 1) % sched->n_copies;
@@ -1327,6 +1365,8 @@ ggml_backend_sched_t ggml_backend_sched_new(
                 sched->events[b][c] = ggml_backend_event_new(backends[b]->device);
             }
         }
+
+        sched->hp_events[b] = false;
     }
 
     sched->galloc = ggml_gallocr_new_n(sched->bufts, n_backends);
@@ -1344,6 +1384,7 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
         for (int c = 0; c < sched->n_copies; c++) {
             ggml_backend_event_free(sched->events[b][c]);
         }
+        // ggml_backend_event_free(sched->hp_events[b]);
     }
     ggml_gallocr_free(sched->galloc);
     ggml_free(sched->ctx);

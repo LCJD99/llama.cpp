@@ -770,6 +770,12 @@ struct vk_instance_t {
     vk_device devices[GGML_VK_MAX_DEVICES];
 };
 
+struct vk_event {
+    std::shared_ptr<vk::Fence> fence;
+};
+
+typedef vk_event* vk_event_t;
+
 static bool vk_instance_initialized = false;
 static vk_instance_t vk_instance;
 
@@ -1378,6 +1384,12 @@ static void ggml_vk_wait_events(vk_context& ctx, std::vector<vk::Event>&& events
         {},
         {}
     );
+}
+
+static vk_event_t ggml_vk_create_vkevent(const vk_device & device) {
+    return new vk_event {
+        std::make_shared<vk::Fence>(device->fence)
+    };
 }
 
 // number of rows/cols for flash attention shader
@@ -2276,8 +2288,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
         device->physical_device = physical_devices[dev_num];
         const std::vector<vk::ExtensionProperties> ext_props = device->physical_device.enumerateDeviceExtensionProperties();
 
-        const char* GGML_VK_PREFER_HOST_MEMORY = getenv("GGML_VK_PREFER_HOST_MEMORY");
-        device->prefer_host_memory = GGML_VK_PREFER_HOST_MEMORY != nullptr;
+        device->prefer_host_memory = true;
 
         bool fp16_storage = false;
         bool fp16_compute = false;
@@ -7792,11 +7803,6 @@ static bool ggml_vk_compute_forward(ggml_backend_vk_context * ctx, ggml_tensor *
 
         ggml_vk_submit(subctx, use_fence ? ctx->fence : vk::Fence{});
 
-        if (use_fence) {
-            VK_CHECK(ctx->device->device.waitForFences({ ctx->fence }, true, UINT64_MAX), "ggml_vk_compute_forward waitForFences");
-
-            ctx->device->device.resetFences({ ctx->fence });
-        }
 #ifdef GGML_VULKAN_CHECK_RESULTS
         ggml_vk_check_results_1(tensor);
 #endif
@@ -8310,11 +8316,19 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
     ctx->device->perf_logger->print_timings();
 #endif
 
-    ggml_vk_graph_cleanup(ctx);
+    // ggml_vk_graph_cleanup(ctx);
 
     return GGML_STATUS_SUCCESS;
 
     UNUSED(backend);
+}
+
+static void ggml_backend_vk_event_wait(ggml_backend_t backend, ggml_backend_event_t event) {
+    ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+
+    ctx->device->device.waitForFences({ ctx->fence }, true, UINT64_MAX);
+    ctx->device->device.resetFences({ ctx->fence });
+    ggml_vk_graph_cleanup(ctx);
 }
 
 // TODO: enable async and synchronize
@@ -8331,7 +8345,7 @@ static ggml_backend_i ggml_backend_vk_interface = {
     /* .graph_plan_compute      = */ NULL,
     /* .graph_compute           = */ ggml_backend_vk_graph_compute,
     /* .event_record            = */ NULL,
-    /* .event_wait              = */ NULL,
+    /* .event_wait              = */ ggml_backend_vk_event_wait,
 };
 
 static ggml_guid_t ggml_backend_vk_guid() {
@@ -8710,6 +8724,21 @@ static bool ggml_backend_vk_device_offload_op(ggml_backend_dev_t dev, const ggml
     UNUSED(dev);
 }
 
+static ggml_backend_event_t ggml_backend_vk_device_event_new(ggml_backend_dev_t dev) {
+    ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;
+    const vk_device& device = ggml_vk_get_device(ctx->device);
+    vk_event_t event = ggml_vk_create_vkevent(device);
+    return new ggml_backend_event {
+        /* .device  = */ dev,
+        /* .context = */ event,
+    };
+}
+
+static void ggml_backend_vk_device_event_free(ggml_backend_dev_t dev, ggml_backend_event_t event) {
+    GGML_UNUSED(dev);
+    delete event;
+}
+
 static const struct ggml_backend_device_i ggml_backend_vk_device_i = {
     /* .get_name             = */ ggml_backend_vk_device_get_name,
     /* .get_description      = */ ggml_backend_vk_device_get_description,
@@ -8723,8 +8752,8 @@ static const struct ggml_backend_device_i ggml_backend_vk_device_i = {
     /* .supports_op          = */ ggml_backend_vk_device_supports_op,
     /* .supports_buft        = */ ggml_backend_vk_device_supports_buft,
     /* .offload_op           = */ ggml_backend_vk_device_offload_op,
-    /* .event_new            = */ NULL,
-    /* .event_free           = */ NULL,
+    /* .event_new            = */ ggml_backend_vk_device_event_new,
+    /* .event_free           = */ ggml_backend_vk_device_event_free,
     /* .event_synchronize    = */ NULL,
 };
 

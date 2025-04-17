@@ -205,13 +205,16 @@ static struct ggml_tensor * llm_build_lora_mm(
          struct ggml_context * ctx0,
           struct ggml_tensor * w,
           struct ggml_tensor * cur,
-          struct ggml_tensor * cur_cpu = nullptr,
-         struct ggml_cgraph * graph = nullptr
+         struct ggml_cgraph * graph = nullptr,
+         struct ggml_tensor ** xw = nullptr
         ) {
 
-    cur_cpu = cur_cpu ? cur_cpu : cur;
-
     struct ggml_tensor * res = ggml_mul_mat(ctx0, w, cur);
+    strcpy(res->name, ("xw." + std::string(w->name)).c_str());
+    if (graph != nullptr) {
+        ggml_build_forward_expand(graph, res);
+    }
+
     for (auto & it : lctx.lora) {
         struct llama_adapter_lora_weight * lw = it.first->get_weight(w);
         if (lw == nullptr) {
@@ -219,16 +222,15 @@ static struct ggml_tensor * llm_build_lora_mm(
         }
         const float adapter_scale = it.second;
         const float scale = lw->get_scale(it.first->alpha, adapter_scale);
-        struct ggml_tensor * cpu_temp = ggml_mul_mat(ctx0, lw->a, cur_cpu);
+        struct ggml_tensor * cpu_temp = ggml_mul_mat(ctx0, lw->a, cur);
         strcpy(cpu_temp->name, (std::string(w->name) + "1.cpu").c_str());
         cpu_temp = ggml_mul_mat(ctx0, lw->b, cpu_temp);
         strcpy(cpu_temp->name, (std::string(w->name) + "2.cpu").c_str());
         cpu_temp = ggml_scale(ctx0, cpu_temp, scale);
         strcpy(cpu_temp->name, (std::string(w->name)+"3.cpu").c_str());
-        if (graph != nullptr) {
-            ggml_build_forward_expand(graph, cpu_temp);
+        if (xw != nullptr) {
+            *xw = cpu_temp;
         }
-
         res = ggml_add(ctx0, res, cpu_temp);
     }
     return res;
@@ -3360,29 +3362,42 @@ struct llm_build_context {
                     LLM_NORM_RMS, cb, il);
             cb(cur, "attn_norm", il);
 
-            cur_cpu = llm_build_norm(ctx0, inpL, hparams,
-                    model.layers[il].attn_norm, NULL,
-                    LLM_NORM_RMS, cb, il);
-            strcpy(cur_cpu->name, cur->name);
-            strcat(cur_cpu->name, ".cpu");
-
             // self-attention
             {
                 // compute Q and K and RoPE them
-                struct ggml_tensor * Qcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wq, cur, cur_cpu, gf);
-                cb(Qcur, "Qcur", il);
+                struct ggml_tensor * lora_q = nullptr;
+                struct ggml_tensor * Qcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wq, cur, gf, &lora_q);
+                if (!Qcur->name) {
+                    cb(Qcur, "Qcur", il);
+                }
                 Qcur = ggml_add(ctx0, Qcur, model.layers[il].bq);
-                cb(Qcur, "Qcur", il);
+                cb(Qcur, "Qcur-bais", il);
 
-                struct ggml_tensor * Kcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wk, cur, cur_cpu, gf);
-                cb(Kcur, "Kcur", il);
+                struct ggml_tensor * lora_k = nullptr;
+                struct ggml_tensor * Kcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wk, cur, gf, &lora_k);
+                if (!Kcur->name) {
+                    cb(Kcur, "Kcur", il);
+                }
                 Kcur = ggml_add(ctx0, Kcur, model.layers[il].bk);
-                cb(Kcur, "Kcur", il);
+                cb(Kcur, "Kcur-bais", il);
 
-                struct ggml_tensor * Vcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wv, cur, cur_cpu, gf);
-                cb(Vcur, "Vcur", il);
+                struct ggml_tensor * lora_v = nullptr;
+                struct ggml_tensor * Vcur = llm_build_lora_mm(lctx, ctx0, model.layers[il].wv, cur, gf, &lora_v);
+                if (!Vcur->name) {
+                    cb(Vcur, "Vcur", il);
+                }
                 Vcur = ggml_add(ctx0, Vcur, model.layers[il].bv);
-                cb(Vcur, "Vcur", il);
+                cb(Vcur, "Vcur-bais", il);
+
+                if (lora_q) {
+                    ggml_build_forward_expand(gf, lora_q);
+                }
+                if (lora_k) {
+                    ggml_build_forward_expand(gf, lora_k);
+                }
+                if (lora_v) {
+                    ggml_build_forward_expand(gf, lora_v);
+                }
 
                 Qcur = ggml_rope_ext(
                     ctx0, ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head,    n_tokens), inp_pos, nullptr,
